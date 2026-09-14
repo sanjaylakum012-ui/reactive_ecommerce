@@ -38,6 +38,13 @@ public class AccountApplicationService {
         this.accountNumberGenerator = accountNumberGenerator;
     }
 
+    /**
+     * Create account flow:
+     * 1. Validate duplicate account rules
+     * 2. Generate new identifiers
+     * 3. Build the domain aggregate
+     * 4. Persist the record and return the API response
+     */
     public AccountResponse create(CreateAccountCommand command) {
 
         log.info(
@@ -46,27 +53,48 @@ public class AccountApplicationService {
                 command.accountType(),
                 command.currency());
 
+        // Step 1: Normalize the command into the domain value object.
         CustomerId customerId = CustomerId.of(command.customerId());
 
-        if (accountRepository.existsByCustomerIdAndAccountType(
-                customerId,
-                command.accountType().name())) {
-
+        // Step 2: Prevent duplicate account creation for the same customer and type.
+        boolean duplicateCustomerAccount =
+                accountRepository.existsByCustomerIdAndAccountType(
+                        customerId,
+                        command.accountType().name());
+        log.info(
+                "Duplicate check for customer/account type: customerId={}, accountType={}, exists={}",
+                customerId.value(),
+                command.accountType(),
+                duplicateCustomerAccount);
+        if (duplicateCustomerAccount) {
             throw new DuplicateAccountException(
                     "Account already exists for customer and account type");
         }
 
+        // Step 3: Generate unique values for the database identity and account number.
         Long accountIdValue = accountIdGenerator.nextAccountId();
         String accountNumberValue = accountNumberGenerator.nextAccountNumber();
+        log.info(
+                "Generated new account identifiers: accountId={}, generatedAccountNumber={}",
+                accountIdValue,
+                accountNumberValue);
 
         AccountId accountId = AccountId.of(accountIdValue);
         AccountNumber accountNumber = AccountNumber.of(accountNumberValue);
         Currency currency = Currency.of(command.currency());
 
-        if (accountRepository.existsByAccountNumber(accountNumber)) {
-                throw new DuplicateAccountException("Account number already exists: " + accountNumber.value());
+        // Step 4: Enforce the uniqueness of the generated account number.
+        boolean duplicateAccountNumber = accountRepository.existsByAccountNumber(accountNumber);
+        log.info(
+                "Duplicate account-number check: accountNumber={}, exists={}",
+                accountNumber.value(),
+                duplicateAccountNumber);
+        if (duplicateAccountNumber) {
+            throw new DuplicateAccountException(
+                    "Account number already exists: " + accountNumber.value());
         }
 
+        // Step 5: Build the aggregate and let the domain model validate invariants.
         Account account = Account.create(
                 accountId,
                 accountNumber,
@@ -74,8 +102,8 @@ public class AccountApplicationService {
                 command.accountType(),
                 currency);
 
+        // Step 6: Persist the aggregate and capture the stored state.
         Account savedAccount = accountRepository.save(account);
-
         log.info(
                 "Execution step completed: createAccount for customerId={}, accountId={}, accountNumber={}",
                 customerId.value(),
@@ -90,6 +118,7 @@ public class AccountApplicationService {
 
         log.info("Execution step started: getById for accountId={}", accountId);
 
+        // Step 1: Load the account by its identifier.
         Account account = accountRepository
                 .findById(AccountId.of(accountId))
                 .orElseThrow(() ->
@@ -111,6 +140,7 @@ public class AccountApplicationService {
                 "Execution step started: getByAccountNumber for accountNumber={}",
                 accountNumber);
 
+        // Step 1: Retrieve the account using the business key (account number).
         Account account = accountRepository
                 .findByAccountNumber(AccountNumber.of(accountNumber))
                 .orElseThrow(() ->
@@ -125,16 +155,20 @@ public class AccountApplicationService {
         return toResponse(account);
     }
 
+    /**
+     * Lifecycle transition flow:
+     * 1. Fetch current account state
+     * 2. Apply the domain transition method
+     * 3. Persist the updated aggregate
+     */
     public AccountResponse activate(Long accountId) {
 
         log.info("Execution step started: activate for accountId={}", accountId);
 
         Account account = getAccount(accountId);
-
         account.activate();
 
         Account updatedAccount = accountRepository.save(account);
-
         log.info(
                 "Execution step completed: activate for accountId={}, status={}",
                 accountId,
@@ -148,11 +182,9 @@ public class AccountApplicationService {
         log.info("Execution step started: freeze for accountId={}", accountId);
 
         Account account = getAccount(accountId);
-
         account.freeze();
 
         Account updatedAccount = accountRepository.save(account);
-
         log.info(
                 "Execution step completed: freeze for accountId={}, status={}",
                 accountId,
@@ -163,28 +195,28 @@ public class AccountApplicationService {
 
     public AccountResponse unfreeze(Long accountId) {
 
-        log.info( "Execution step started: unfreeze for accountId={}", accountId);
+        log.info("Execution step started: unfreeze for accountId={}", accountId);
 
         Account account = getAccount(accountId);
-
         account.unfreeze();
 
         Account updatedAccount = accountRepository.save(account);
+        log.info(
+                "Execution step completed: unfreeze for accountId={}, status={}",
+                accountId,
+                updatedAccount.status());
 
-        log.info( "Execution step completed: unfreeze for accountId={}, status={}", accountId, updatedAccount.status());
         return toResponse(updatedAccount);
-        }
+    }
 
     public AccountResponse makeDormant(Long accountId) {
 
         log.info("Execution step started: makeDormant for accountId={}", accountId);
 
         Account account = getAccount(accountId);
-
         account.makeDormant();
 
         Account updatedAccount = accountRepository.save(account);
-
         log.info(
                 "Execution step completed: makeDormant for accountId={}, status={}",
                 accountId,
@@ -198,11 +230,9 @@ public class AccountApplicationService {
         log.info("Execution step started: close for accountId={}", accountId);
 
         Account account = getAccount(accountId);
-
         account.close();
 
         Account updatedAccount = accountRepository.save(account);
-
         log.info(
                 "Execution step completed: close for accountId={}, status={}",
                 accountId,
@@ -215,6 +245,7 @@ public class AccountApplicationService {
 
         log.info("Execution step: getAccount for accountId={}", accountId);
 
+        // Retrieve the current aggregate before applying any lifecycle transition.
         return accountRepository
                 .findById(AccountId.of(accountId))
                 .orElseThrow(() ->
@@ -224,6 +255,7 @@ public class AccountApplicationService {
 
     private AccountResponse toResponse(Account account) {
 
+        // Convert the aggregate to the outward-facing response model.
         return new AccountResponse(
                 account.accountId().value(),
                 account.customerId().value(),

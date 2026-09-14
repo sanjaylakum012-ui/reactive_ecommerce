@@ -45,6 +45,12 @@ public class CustomerApplicationService {
                 this.customerIdGenerator = customerIdGenerator;
         }
 
+        /**
+         * Create-customer flow:
+         * 1. Validate duplicate business keys
+         * 2. Build the aggregate from the command
+         * 3. Save the aggregate and return the API response
+         */
         public CustomerResponse createCustomer(
                         CreateCustomerCommand command) {
 
@@ -53,22 +59,31 @@ public class CustomerApplicationService {
                                 command.emailAddress(),
                                 command.mobileNumber());
 
-                if (customerRepository.existsByEmailAddress(
-                                command.emailAddress())) {
-
+                // Step 1: Guard against duplicate email address.
+                boolean duplicateEmail = customerRepository.existsByEmailAddress(command.emailAddress());
+                log.info(
+                                "Duplicate email check for email={}, exists={}",
+                                command.emailAddress(),
+                                duplicateEmail);
+                if (duplicateEmail) {
                         throw new DuplicateCustomerException(
                                         "Customer already exists with email address: "
                                                         + command.emailAddress());
                 }
 
-                if (customerRepository.existsByMobileNumber(
-                                command.mobileNumber())) {
-
+                // Step 2: Guard against duplicate mobile number.
+                boolean duplicateMobile = customerRepository.existsByMobileNumber(command.mobileNumber());
+                log.info(
+                                "Duplicate mobile check for mobile={}, exists={}",
+                                command.mobileNumber(),
+                                duplicateMobile);
+                if (duplicateMobile) {
                         throw new DuplicateCustomerException(
                                         "Customer already exists with mobile number: "
                                                         + command.mobileNumber());
                 }
 
+                // Step 3: Create the aggregate using the domain model's factory.
                 Customer customer = Customer.create(
                                 customerIdGenerator.nextCustomerId(),
                                 CustomerName.of(command.name()),
@@ -83,8 +98,8 @@ public class CustomerApplicationService {
                                                 command.postalCode(),
                                                 command.country()));
 
+                // Step 4: Persist the customer and log the saved identity.
                 Customer savedCustomer = customerRepository.save(customer);
-
                 log.info(
                                 "Execution step completed: createCustomer for customerId={}, status={}",
                                 savedCustomer.customerId().value(),
@@ -99,6 +114,7 @@ public class CustomerApplicationService {
 
                 CustomerId id = CustomerId.of(customerId);
 
+                // Retrieve the customer aggregate using the primary identifier.
                 Customer customer = customerRepository
                                 .findById(id)
                                 .orElseThrow(() -> new IllegalArgumentException(
@@ -114,21 +130,12 @@ public class CustomerApplicationService {
 
         /**
          * Updates an existing customer.
-                                                        Customer customer = Customer.create(
-                                                                        customerIdGenerator.nextCustomerId(),
-         * This method represents the Update Customer use case.
          *
          * Responsibilities:
-         * - Load the existing customer
-         * - Check whether the new email/mobile belongs
-         * to another customer
-         * - Convert raw input into domain value objects
-         * - Ask the Customer aggregate to perform the update
-         * - Persist the updated aggregate
-         * - Convert the result into a response DTO
-         *
-         * Business rules remain inside the domain aggregate
-         * wherever possible.
+         * - Load the current aggregate
+         * - Validate identity conflicts against the new email/mobile
+         * - Update domain state through aggregate methods
+         * - Save the aggregate and return the response
          */
         public CustomerResponse updateCustomer(Long customerId, UpdateCustomerCommand command) {
 
@@ -137,59 +144,46 @@ public class CustomerApplicationService {
                                 customerId,
                                 command.emailAddress());
 
-                // Convert the UUID into the domain-specific CustomerId.
+                // Step 1: Resolve the customer aggregate from the repository.
                 CustomerId id = CustomerId.of(customerId);
-
-                // Load the existing customer from the repository.
                 Customer customer = customerRepository
                                 .findById(id)
                                 .orElseThrow(() -> new IllegalArgumentException(
                                                 "Customer not found: " + customerId));
 
-                /*
-                 * Check whether the requested email already belongs
-                 * to another customer.
-                 *
-                 * We must allow the customer to keep their own email.
-                 */
-                if (!customer.emailAddress().value()
+                // Step 2: Ensure no other customer uses the requested email.
+                boolean emailAlreadyTaken = !customer.emailAddress().value()
                                 .equalsIgnoreCase(command.emailAddress())
-                                && customerRepository.existsByEmailAddress(
-                                                command.emailAddress())) {
-
+                                && customerRepository.existsByEmailAddress(command.emailAddress());
+                log.info(
+                                "Email conflict validation for customerId={}, email={}, conflict={}",
+                                customerId,
+                                command.emailAddress(),
+                                emailAlreadyTaken);
+                if (emailAlreadyTaken) {
                         throw new DuplicateCustomerException(
                                         "Customer already exists with email address: " + command.emailAddress());
                 }
 
-                /*
-                 * Check whether the requested mobile number already
-                 * belongs to another customer.
-                 *
-                 * We must allow the customer to keep their own
-                 * existing mobile number.
-                 */
-                if (!customer.mobileNumber().value()
+                // Step 3: Ensure no other customer uses the requested mobile number.
+                boolean mobileAlreadyTaken = !customer.mobileNumber().value()
                                 .equals(command.mobileNumber())
-                                && customerRepository.existsByMobileNumber(
-                                                command.mobileNumber())) {
-
+                                && customerRepository.existsByMobileNumber(command.mobileNumber());
+                log.info(
+                                "Mobile conflict validation for customerId={}, mobile={}, conflict={}",
+                                customerId,
+                                command.mobileNumber(),
+                                mobileAlreadyTaken);
+                if (mobileAlreadyTaken) {
                         throw new DuplicateCustomerException(
                                         "Customer already exists with mobile number: " + command.mobileNumber());
                 }
 
-                /*
-                 * Update the customer aggregate through domain methods.
-                 *
-                 * We do not modify fields directly because the aggregate
-                 * owns its state and business rules.
-                 */
-                customer.updateName(
-                                CustomerName.of(command.name()));
-
+                // Step 4: Update the domain aggregate by invoking its lifecycle methods.
+                customer.updateName(CustomerName.of(command.name()));
                 customer.updateContactInformation(
                                 EmailAddress.of(command.emailAddress()),
                                 MobileNumber.of(command.mobileNumber()));
-
                 customer.updateAddress(
                                 Address.of(
                                                 command.addressLine1(),
@@ -199,31 +193,22 @@ public class CustomerApplicationService {
                                                 command.postalCode(),
                                                 command.country()));
 
-                // Persist the updated aggregate.
+                // Step 5: Persist the updated aggregate state.
                 Customer updatedCustomer = customerRepository.save(customer);
-
                 log.info(
                                 "Execution step completed: updateCustomer for customerId={}, status={}",
                                 updatedCustomer.customerId().value(),
                                 updatedCustomer.status());
 
-                // Convert the domain object into an API response.
                 return toResponse(updatedCustomer);
         }
 
         /**
          * Deletes an existing customer.
          *
-         * This method implements the Delete Customer use case.
-         *
          * The application service first retrieves the customer
          * from the repository and then asks the repository to
          * delete the aggregate.
-         *
-         * Business rules related to deletion can be added here
-         * later if the CBS requires soft-delete or restrictions.
-         *
-         * @param customerId unique customer identifier
          */
         public void deleteCustomer(Long customerId) {
 
@@ -231,11 +216,13 @@ public class CustomerApplicationService {
 
                 CustomerId id = CustomerId.of(customerId);
 
+                // Step 1: Load the aggregate to confirm it exists.
                 Customer customer = customerRepository
                                 .findById(id)
                                 .orElseThrow(() -> new IllegalArgumentException(
                                                 "Customer not found: " + customerId));
 
+                // Step 2: Delete the aggregate from the persistence layer.
                 customerRepository.delete(customer);
 
                 log.info(
@@ -246,6 +233,7 @@ public class CustomerApplicationService {
         private CustomerResponse toResponse(
                         Customer customer) {
 
+                // Convert the aggregate to the API response contract.
                 return new CustomerResponse(
                                 customer.customerId().value(),
                                 customer.name().value(),
@@ -279,8 +267,7 @@ public class CustomerApplicationService {
                                 .orElseThrow(() -> new IllegalArgumentException(
                                                 "Customer not found: " + customerId));
 
-                // Domain aggregate validates whether activation
-                // is allowed from the current customer status.
+                // Execute the domain validation and state transition.
                 customer.activate();
 
                 Customer savedCustomer = customerRepository.save(customer);
